@@ -63,6 +63,8 @@ public final class HanlpTokenizer extends Tokenizer {
     private Iterator<Segment> wordsIter = Collections.emptyIterator();
     private ConcurrentHashMap<String, List<String>> config;
     private RequestConfig requestConfig;
+    private static Set<String> ignore;
+
 
     private PositionIncrementAttribute posIncrAtt;
 
@@ -86,13 +88,11 @@ public final class HanlpTokenizer extends Tokenizer {
     public HanlpTokenizer(Settings settings) {
         this();
 
-        logger.info("Init QuTokenizer settings");
+        logger.info("Init HanlpTokenizer settings");
         config.put(Constants.URL_KEY, settings.getAsList(Constants.URL_KEY));
-        config.put(Constants.TRGT_TYPES_KEY, settings.getAsList(Constants.TRGT_TYPES_KEY));
         config.put(Constants.IGNORE_POS_KEY, settings.getAsList(Constants.IGNORE_POS_KEY));
-
-        logger.info("Config:");
-        logger.info(config);
+        ignore = new HashSet<>(config.getOrDefault(Constants.IGNORE_POS_KEY, new ArrayList<>()));
+        logger.info("Config:\n" + config);
     }
 
     @Override
@@ -168,16 +168,18 @@ public final class HanlpTokenizer extends Tokenizer {
 
                     try (BufferedReader bfr = new BufferedReader(new InputStreamReader(entity.getContent(), StandardCharsets.UTF_8))) {
                         String resultStr = bfr.lines().map(String::trim).reduce("", (x, y) -> x + y).trim();
-
-                        Result result = JSON.parseObject(resultStr, Result.class);
-
-                        Set<String> ignore = new HashSet<>(config.getOrDefault(Constants.IGNORE_POS_KEY, new ArrayList<>()));
-
-                        result.getSegment().stream().filter(x -> !ignore.contains(x.getPos())).forEach(words::add);
+                        List<String> result = JSON.parseObject(resultStr, List.class);
+                        result.stream().filter(this::isNotBlank).map(x -> {
+                            String[] items = x.split(",");
+                            Segment segment = new Segment();
+                            segment.setText(items[0]);
+                            segment.setStartIndex(Integer.valueOf(items[1]));
+                            segment.setEndIndex(Integer.valueOf(items[2]));
+                            segment.setPos(items[3]);
+                            return segment;
+                        }).filter(x -> !ignore.contains(x.getPos())).forEach(words::add);
                     }
-
                 }
-
             } catch (IOException e) {
                 e.printStackTrace();
                 logger.error("Error happened during remote call," + e);
@@ -198,6 +200,10 @@ public final class HanlpTokenizer extends Tokenizer {
         int finalOffset = correctOffset(this.endPosition);
         offsetAtt.setOffset(finalOffset, finalOffset);
         posIncrAtt.setPositionIncrement(posIncrAtt.getPositionIncrement() + increment);
+    }
+
+    private boolean isNotBlank(CharSequence cs) {
+        return !isBlank(cs);
     }
 
     private static boolean isBlank(CharSequence cs) {

@@ -34,7 +34,7 @@ public class HanlpAnalyzerProvider extends AbstractIndexAnalyzerProvider<HanlpAn
     public HanlpAnalyzerProvider(IndexSettings indexSettings, Environment env, String name, Settings settings) {
         super(indexSettings, name, settings);
 
-        this.analyzer = new HanlpAnalyzer(env.settings().getAsSettings("node.attr.qu"));
+        this.analyzer = new HanlpAnalyzer(env.settings().getAsSettings("node.attr.hanlp"));
     }
 
     @Override

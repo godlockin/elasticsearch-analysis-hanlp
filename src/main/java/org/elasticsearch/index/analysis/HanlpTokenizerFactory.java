@@ -35,7 +35,7 @@ public class HanlpTokenizerFactory extends AbstractTokenizerFactory {
     public HanlpTokenizerFactory(IndexSettings indexSettings, Environment env, String name, Settings settings) {
         super(indexSettings, settings, name);
 
-        Settings eSettings = env.settings().getAsSettings("node.attr.qu");
+        Settings eSettings = env.settings().getAsSettings("node.attr.hanlp");
         this.tokenizer = (null == eSettings) ? new HanlpTokenizer() : new HanlpTokenizer(settings);
     }
 

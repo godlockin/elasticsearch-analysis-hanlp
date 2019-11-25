@@ -25,6 +25,5 @@ package org.elasticsearch.common;
 public class Constants {
 
     public static final String URL_KEY = "url";
-    public static final String TRGT_TYPES_KEY = "types";
     public static final String IGNORE_POS_KEY = "ignorePos";
 }
