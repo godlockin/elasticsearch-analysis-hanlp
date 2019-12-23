@@ -22,6 +22,8 @@
  */
 package org.analyzer.lucene;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.apache.lucene.analysis.Analyzer;
 import org.elasticsearch.common.settings.Settings;
 
@@ -35,7 +37,7 @@ public final class HanlpAnalyzer extends Analyzer {
 
 	@Override
 	protected TokenStreamComponents createComponents(String fieldName) {
-		HanlpTokenizer tokenizer = (null == settings) ? new HanlpTokenizer() : new HanlpTokenizer(settings);
+		HanlpTokenizer tokenizer = new HanlpTokenizer(settings);
 		return new TokenStreamComponents(tokenizer);
     }
 

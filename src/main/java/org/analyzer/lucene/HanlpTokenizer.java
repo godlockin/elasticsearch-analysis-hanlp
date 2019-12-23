@@ -30,7 +30,9 @@ import org.apache.http.client.methods.HttpPost;
 import org.apache.http.entity.ContentType;
 import org.apache.http.entity.StringEntity;
 import org.apache.http.impl.client.CloseableHttpClient;
+import org.apache.http.impl.client.DefaultHttpRequestRetryHandler;
 import org.apache.http.impl.client.HttpClients;
+import org.apache.http.impl.conn.PoolingHttpClientConnectionManager;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.apache.lucene.analysis.Tokenizer;
@@ -40,7 +42,6 @@ import org.apache.lucene.analysis.tokenattributes.PositionIncrementAttribute;
 import org.apache.lucene.analysis.tokenattributes.TypeAttribute;
 import org.elasticsearch.SpecialPermission;
 import org.elasticsearch.common.Constants;
-import org.elasticsearch.common.entity.Result;
 import org.elasticsearch.common.entity.Segment;
 import org.elasticsearch.common.settings.Settings;
 
@@ -52,6 +53,7 @@ import java.security.AccessController;
 import java.security.PrivilegedAction;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
 
 public final class HanlpTokenizer extends Tokenizer {
 
@@ -64,13 +66,24 @@ public final class HanlpTokenizer extends Tokenizer {
     private ConcurrentHashMap<String, List<String>> config;
     private RequestConfig requestConfig;
     private static Set<String> ignore;
-
+    private static CloseableHttpClient closeableHttpClient;
 
     private PositionIncrementAttribute posIncrAtt;
 
     private int increment = 0;
 
-    public HanlpTokenizer() {
+    public static CloseableHttpClient httpClient() {
+        if (null == HanlpTokenizer.closeableHttpClient) {
+            synchronized (HanlpTokenizer.class) {
+                if (null == HanlpTokenizer.closeableHttpClient) {
+                    HanlpTokenizer.closeableHttpClient = initClient();
+                }
+            }
+        }
+        return HanlpTokenizer.closeableHttpClient;
+    }
+
+    private HanlpTokenizer() {
         super();
 
         offsetAtt = addAttribute(OffsetAttribute.class);
@@ -83,6 +96,24 @@ public final class HanlpTokenizer extends Tokenizer {
                 .setConnectionRequestTimeout(10 * 1000)
                 .setSocketTimeout(60 * 1000)
                 .build();
+        closeableHttpClient = httpClient();
+    }
+
+    private static CloseableHttpClient initClient() {
+        // 长连接保持时长30秒
+        PoolingHttpClientConnectionManager pollingConnectionManager = new PoolingHttpClientConnectionManager(10, TimeUnit.SECONDS);
+        // 最大连接数
+        pollingConnectionManager.setMaxTotal(5000);
+        // 单路由的并发数
+        pollingConnectionManager.setDefaultMaxPerRoute(500);
+
+        closeableHttpClient = HttpClients.custom()
+                .setConnectionManager(pollingConnectionManager)
+                .setRetryHandler(new DefaultHttpRequestRetryHandler(2, true))  // 重试次数2次，并开启
+                .setKeepAliveStrategy((response, context) -> 20 * 1000) // 保持长连接配置，需要在头添加Keep-Alive
+                .build();
+
+        return closeableHttpClient;
     }
 
     public HanlpTokenizer(Settings settings) {
@@ -120,7 +151,7 @@ public final class HanlpTokenizer extends Tokenizer {
     }
 
     @Override
-    public void reset() throws IOException {
+    synchronized public void reset() throws IOException {
         super.reset();
 
         // reset the input content
@@ -144,49 +175,49 @@ public final class HanlpTokenizer extends Tokenizer {
         }
     }
 
-    private List<Segment> doQueryRemoteForSeg(String fullStr) {
+    synchronized private List<Segment> doQueryRemoteForSeg(String fullStr) {
         SpecialPermission.check();
         return AccessController.doPrivileged((PrivilegedAction<List<Segment>>) () -> getSetUnprivileged(fullStr));
     }
 
-    private List<Segment> getSetUnprivileged(String fullStr) {
+    synchronized private List<Segment> getSetUnprivileged(String fullStr) {
         List<Segment> words = new ArrayList<>();
 
-        try {
-            Map<String, String> map = new HashMap() {{put("text", fullStr);}};
+        Map<String, String> map = new HashMap<>();
+        map.put("text", fullStr);
 
-            HttpPost post = new HttpPost(new ArrayList<>(config.get(Constants.URL_KEY)).get(0));
-            post.setConfig(requestConfig);
-            post.setEntity(new StringEntity(JSON.toJSONString(map), ContentType.APPLICATION_JSON));
-            post.setHeader("Content-type", "application/json");
+        HttpPost post = new HttpPost(new ArrayList<>(config.get(Constants.URL_KEY)).get(0));
+        post.setConfig(requestConfig);
+        post.setEntity(new StringEntity(JSON.toJSONString(map), ContentType.APPLICATION_JSON));
+        post.setHeader("Content-type", "application/json");
 
-            try (CloseableHttpClient httpClient = HttpClients.createDefault()) {
+        try (CloseableHttpResponse response = closeableHttpClient.execute(post)) {
+            if (200 == response.getStatusLine().getStatusCode()) {
+                HttpEntity entity = response.getEntity();
 
-                CloseableHttpResponse response = httpClient.execute(post);
-                if (200 == response.getStatusLine().getStatusCode()) {
-                    HttpEntity entity = response.getEntity();
+                try (BufferedReader bfr = new BufferedReader(new InputStreamReader(entity.getContent(), StandardCharsets.UTF_8))) {
+                    String resultStr = bfr.lines().map(String::trim).reduce("", (x, y) -> x + y).trim();
 
-                    try (BufferedReader bfr = new BufferedReader(new InputStreamReader(entity.getContent(), StandardCharsets.UTF_8))) {
-                        String resultStr = bfr.lines().map(String::trim).reduce("", (x, y) -> x + y).trim();
-                        List<String> result = JSON.parseObject(resultStr, List.class);
-                        result.stream().filter(this::isNotBlank).map(x -> {
-                            String[] items = x.split(",");
-                            Segment segment = new Segment();
-                            segment.setText(items[0]);
-                            segment.setStartIndex(Integer.valueOf(items[1]));
-                            segment.setEndIndex(Integer.valueOf(items[2]));
-                            segment.setPos(items[3]);
-                            return segment;
-                        }).filter(x -> !ignore.contains(x.getPos())).forEach(words::add);
-                    }
+                    List<String> result = JSON.parseObject(resultStr, List.class);
+                    result.stream()
+                            .filter(Objects::nonNull)
+                            .map(String::trim)
+                            .filter(this::isNotBlank)
+                            .map(x -> x.split(","))
+                            .filter(x -> 4 == x.length)
+                            .map(x -> {
+                                Segment segment = new Segment();
+                                segment.setText(x[0]);
+                                segment.setStartIndex(Integer.valueOf(x[1]));
+                                segment.setEndIndex(Integer.valueOf(x[2]));
+                                segment.setPos(x[3]);
+                                return segment;
+                            }).filter(x -> !ignore.contains(x.getPos())).forEach(words::add);
                 }
-            } catch (IOException e) {
-                e.printStackTrace();
-                logger.error("Error happened during remote call," + e);
             }
-        } catch (Exception e) {
+        } catch (Exception e){
             e.printStackTrace();
-            logger.error("Error happened during remote call build," + e);
+            logger.error("Error happened during remote call," + e);
         }
 
         return words;
